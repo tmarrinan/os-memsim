@@ -1,3 +1,5 @@
+#include <iostream>
+#include <algorithm>
 #include "mmu.h"
 
 Mmu::Mmu(int memory_size)
@@ -25,6 +27,7 @@ uint32_t Mmu::createProcess()
     _processes.push_back(proc);
 
     _next_pid++;
+    
     return proc->pid;
 }
 
@@ -32,21 +35,18 @@ void Mmu::addVariableToProcess(uint32_t pid, std::string var_name, DataType type
 {
     int i;
     Process *proc = NULL;
-    for (i = 0; i < _processes.size(); i++)
-    {
-        if (_processes[i]->pid == pid)
-        {
-            proc = _processes[i];
-        }
-    }
+    std::vector<Process*>::iterator it = std::find_if(_processes.begin(), _processes.end(), [search_id](Process* p)
+    { 
+        return p != nullptr && p->pid == search_id; 
+    });
 
-    Variable *var = new Variable();
-    var->name = var_name;
-    var->type = type;
-    var->virtual_address = address;
-    var->size = size;
     if (proc != NULL)
     {
+        Variable *var = new Variable();
+        var->name = var_name;
+        var->type = type;
+        var->virtual_address = address;
+        var->size = size;
         proc->variables.push_back(var);
     }
 }
@@ -61,7 +61,7 @@ void Mmu::print()
     {
         for (j = 0; j < _processes[i]->variables.size(); j++)
         {
-            // TODO: print all variables (excluding <FREE_SPACE> entries)
+            // TODO: print all variables (excluding those of type DataType::FreeSpace)
         }
     }
 }
