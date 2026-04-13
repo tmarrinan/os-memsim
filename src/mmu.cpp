@@ -1,5 +1,4 @@
 #include <iostream>
-#include <cstdint>
 #include <algorithm>
 #include "mmu.h"
 
