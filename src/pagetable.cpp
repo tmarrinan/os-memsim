@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "pagetable.h"
 
 PageTable::PageTable(int page_size)
