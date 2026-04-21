@@ -1,0 +1,29 @@
+create 5992 564
+create 14788 296
+allocate 1024 point_x int 1
+allocate 1024 point_y int 1
+allocate 1025 temperature double 1
+allocate 1024 name char 256
+allocate 1024 time long 2
+allocate 1024 data int 2000
+allocate 1025 pressure double 1
+set 1024 point_x 0 100
+set 1024 point_y 0 200
+set 1024 name 0 l o c a t i o n
+set 1024 time 0 200 400 600
+set 1024 time 0 91246723975
+set 1024 time 1 91246724068
+set 1024 other_var 0 3.14
+set 1025 temperature 0 98.6
+set 1025 pressure 0 36.2
+destroy 1025
+print processes
+print page
+print mmu
+print 1024:name
+print 1024:time
+free 1024 data
+print page
+terminate 1025
+print mmu
+exit

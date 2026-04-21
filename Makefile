@@ -1,30 +1,35 @@
-CXX= g++
-CXXFLAGS= -std=c++14
+CXX = g++
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2
+TARGET = mmu-simulator
+SOURCES = main.cpp mmu.cpp
 
-INCLUDE= -I./include
-LIB= 
+all: $(TARGET)
 
-SRCDIR= src
-OBJDIR= obj
-BINDIR= bin
+$(TARGET): $(SOURCES)
+	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SOURCES)
 
-OBJS= $(addprefix $(OBJDIR)/, main.o mmu.o pagetable.o)
-EXEC= $(addprefix $(BINDIR)/, memsim)
-
-# CREATE DIRECTORIES (IF DON'T ALREADY EXIST)
-mkdirs:= $(shell mkdir -p $(OBJDIR) $(BINDIR))
-
-
-# BUILD EVERYTHING
-all: $(EXEC)
-
-$(EXEC): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIB)
-
-$(OBJDIR)/%.o: $(SRCDIR)/%.cpp
-	$(CXX) $(CXXFLAGS) -c -o $@ $< $(INCLUDE)
-
-
-# REMOVE OLD FILES
 clean:
-	rm -f $(OBJS) $(EXEC)
+	rm -f $(TARGET)
+
+test: $(TARGET)
+	@echo "Testing MMU Simulator..."
+	@echo "Creating test script..."
+	@echo "create 2048 512" > test_commands.txt
+	@echo "allocate 1024 my_array int 10" >> test_commands.txt
+	@echo "set 1024 my_array 0 1 2 3 4" >> test_commands.txt
+	@echo "print 1024:my_array" >> test_commands.txt
+	@echo "print processes" >> test_commands.txt
+	@echo "print mmu" >> test_commands.txt
+	@echo "exit" >> test_commands.txt
+	@echo "Running test with 4096 byte page size..."
+	./$(TARGET) 4096 < test_commands.txt
+	@rm -f test_commands.txt
+
+help:
+	@echo "Available targets:"
+	@echo "  all     - Build the simulator"
+	@echo "  clean   - Remove compiled files"
+	@echo "  test    - Run basic tests"
+	@echo "  help    - Show this help"
+
+.PHONY: all clean test help
