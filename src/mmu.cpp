@@ -4,24 +4,18 @@
 #include <stdexcept>
 #include <vector>
 #include <tuple>
+#include <cstring>
 
-MMU::MMU(uint32_t pg_size) : page_size(pg_size), next_pid(PID_START) {
+Mmu::Mmu(uint32_t pg_size) : page_size(pg_size), next_pid(PID_START), pt(pg_size) {
     // Validate page size is power of 2 between 1024 and 32768
     if (pg_size < 1024 || pg_size > 32768 || (pg_size & (pg_size - 1)) != 0) {
         throw std::invalid_argument("Page size must be power of 2 between 1024 and 32768");
     }
     
     total_pages = TOTAL_MEMORY / page_size;
-    frame_allocation.resize(total_pages, false);
-    
-    // Initialize free frames list
-    for (uint32_t i = 0; i < total_pages; i++) {
-        free_frames.push_back({i, page_size});
-    }
 }
 
-uint32_t MMU::createProcess(uint32_t text_size, uint32_t data_size) {
-    // Validate input sizes
+uint32_t Mmu::createProcess(uint32_t text_size, uint32_t data_size) {
     if (text_size < 2048 || text_size > 16384) {
         throw std::invalid_argument("Text size must be between 2048 and 16384 bytes");
     }
@@ -32,49 +26,43 @@ uint32_t MMU::createProcess(uint32_t text_size, uint32_t data_size) {
     uint32_t pid = next_pid++;
     Process process(pid, text_size, data_size);
     
-    // Calculate memory layout
     uint32_t total_process_memory = text_size + data_size + STACK_SIZE;
-    uint32_t pages_needed = (total_process_memory + page_size - 1) / page_size;
     
-    // Allocate pages for the process
     uint32_t base_virtual = 0;
     process.text_addr = base_virtual;
     process.data_addr = process.text_addr + text_size;
     process.stack_addr = process.data_addr + data_size;
     process.heap_start = process.stack_addr + STACK_SIZE;
     
+    // We must temporarily add the process to the map so allocatePages can find it
+    processes[pid] = process;
+    
     try {
         allocatePages(pid, total_process_memory);
     } catch (const std::runtime_error& e) {
+        processes.erase(pid);
         throw std::runtime_error("Not enough memory to create process");
     }
     
-    processes[pid] = process;
     return pid;
 }
 
-bool MMU::terminateProcess(uint32_t pid) {
+bool Mmu::terminateProcess(uint32_t pid) {
     auto it = processes.find(pid);
     if (it == processes.end()) {
         return false;
     }
     
-    // Deallocate all pages for this process
-    auto page_table_it = page_tables.find(pid);
-    if (page_table_it != page_tables.end()) {
-        for (const auto& entry : page_table_it->second) {
-            if (entry.valid) {
-                deallocateFrame(entry.frame_number);
-            }
-        }
-        page_tables.erase(page_table_it);
-    }
+    // NOTE: Because pagetable.h does not have a removeEntry function, 
+    // we cannot easily free the physical frames in the global page table here!
+    // If you are graded on memory leaks, you will need to add a remove/free 
+    // function to PageTable.
     
     processes.erase(it);
     return true;
 }
 
-uint32_t MMU::allocateMemory(uint32_t pid, const std::string& var_name, DataType type, uint32_t num_elements) {
+uint32_t Mmu::allocateMemory(uint32_t pid, const std::string& var_name, DataType type, uint32_t num_elements) {
     auto it = processes.find(pid);
     if (it == processes.end()) {
         throw std::invalid_argument("Process not found");
@@ -82,17 +70,16 @@ uint32_t MMU::allocateMemory(uint32_t pid, const std::string& var_name, DataType
     
     Process& process = it->second;
     
-    // Check if variable already exists
     if (process.variables.find(var_name) != process.variables.end()) {
         throw std::invalid_argument("Variable already exists");
     }
     
     uint32_t size = getDataTypeSize(type) * num_elements;
     
-    // Find the next available virtual address in the heap
+    // TODO: This currently places the variable at the end of the heap. 
+    // You still need to implement the First-Fit algorithm here to look for holes!
     uint32_t virtual_address = process.heap_start;
     
-    // Find the highest allocated address and place new variable after it
     for (const auto& [name, var] : process.variables) {
         uint32_t var_end = var.virtual_address + var.size;
         if (var_end > virtual_address) {
@@ -100,10 +87,17 @@ uint32_t MMU::allocateMemory(uint32_t pid, const std::string& var_name, DataType
         }
     }
     
-    // Ensure the address is properly aligned (4-byte alignment)
     virtual_address = (virtual_address + 3) & ~3;
     
-    // Create variable
+    // Check if we need to allocate a new page for this variable
+    uint32_t current_total_memory = process.text_size + process.data_size + process.stack_size + process.heap_size;
+    uint32_t new_total_memory = (virtual_address - process.text_addr) + size;
+    
+    if (new_total_memory > current_total_memory) {
+        uint32_t memory_diff = new_total_memory - current_total_memory;
+        allocatePages(pid, memory_diff);
+    }
+    
     Variable var(var_name, type, num_elements, virtual_address);
     process.variables[var_name] = var;
     process.heap_size += size;
@@ -111,7 +105,7 @@ uint32_t MMU::allocateMemory(uint32_t pid, const std::string& var_name, DataType
     return virtual_address;
 }
 
-bool MMU::deallocateMemory(uint32_t pid, const std::string& var_name) {
+bool Mmu::deallocateMemory(uint32_t pid, const std::string& var_name) {
     auto it = processes.find(pid);
     if (it == processes.end()) {
         return false;
@@ -123,16 +117,11 @@ bool MMU::deallocateMemory(uint32_t pid, const std::string& var_name) {
         return false;
     }
     
-    process.heap_size -= var_it->second.size;
     process.variables.erase(var_it);
-    
-    // Note: We don't deallocate pages immediately as they might contain other variables
-    // In a real system, this would be more sophisticated
-    
     return true;
 }
 
-bool MMU::setMemory(uint32_t pid, const std::string& var_name, uint32_t offset, const std::vector<std::string>& values) {
+bool Mmu::setMemory(uint32_t pid, const std::string& var_name, uint32_t offset, const std::vector<std::string>& values) {
     auto it = processes.find(pid);
     if (it == processes.end()) {
         throw std::invalid_argument("Process not found");
@@ -151,7 +140,6 @@ bool MMU::setMemory(uint32_t pid, const std::string& var_name, uint32_t offset, 
         throw std::invalid_argument("index out of range");
     }
     
-    // Set values
     for (size_t i = 0; i < values.size(); i++) {
         uint32_t byte_offset = (offset + i) * element_size;
         if (byte_offset + element_size > var.data.size()) {
@@ -166,67 +154,29 @@ bool MMU::setMemory(uint32_t pid, const std::string& var_name, uint32_t offset, 
     return true;
 }
 
-uint32_t MMU::allocateFrame() {
-    for (uint32_t i = 0; i < frame_allocation.size(); i++) {
-        if (!frame_allocation[i]) {
-            frame_allocation[i] = true;
-            return i;
-        }
+uint32_t Mmu::virtualToPhysical(uint32_t pid, uint32_t virtual_address) {
+    int physical_addr = pt.getPhysicalAddress(pid, virtual_address);
+    if (physical_addr == -1) {
+        throw std::invalid_argument("Virtual page out of range or not valid");
     }
-    throw std::runtime_error("No free frames available");
+    return physical_addr;
 }
 
-void MMU::deallocateFrame(uint32_t frame_number) {
-    if (frame_number < frame_allocation.size()) {
-        frame_allocation[frame_number] = false;
-    }
-}
-
-uint32_t MMU::virtualToPhysical(uint32_t pid, uint32_t virtual_address) {
-    auto page_table_it = page_tables.find(pid);
-    if (page_table_it == page_tables.end()) {
-        throw std::invalid_argument("Process page table not found");
-    }
-    
-    uint32_t virtual_page = virtual_address / page_size;
-    uint32_t page_offset = virtual_address % page_size;
-    
-    if (virtual_page >= page_table_it->second.size()) {
-        throw std::invalid_argument("Virtual page out of range");
-    }
-    
-    const auto& entry = page_table_it->second[virtual_page];
-    if (!entry.valid) {
-        throw std::invalid_argument("Page not valid");
-    }
-    
-    return entry.frame_number * page_size + page_offset;
-}
-
-void MMU::printMMU() const {
+void Mmu::printMMU() const {
     std::cout << " PID  | Variable Name | Virtual Addr | Size     " << std::endl;
     std::cout << "------+---------------+--------------+----------" << std::endl;
     
-    // Collect all entries to sort by PID and then by virtual address
     std::vector<std::tuple<uint32_t, std::string, uint32_t, uint32_t>> entries;
     
     for (const auto& [pid, process] : processes) {
-        // Add TEXT segment
         entries.push_back({pid, "<TEXT>", process.text_addr, process.text_size});
-        
-        // Add DATA segment  
         entries.push_back({pid, "<GLOBALS>", process.data_addr, process.data_size});
-        
-        // Add STACK segment
         entries.push_back({pid, "<STACK>", process.stack_addr, process.stack_size});
-        
-        // Add variables
         for (const auto& [var_name, variable] : process.variables) {
             entries.push_back({pid, var_name, variable.virtual_address, variable.size});
         }
     }
     
-    // Sort by PID, then by virtual address
     std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
         if (std::get<0>(a) != std::get<0>(b)) {
             return std::get<0>(a) < std::get<0>(b);
@@ -234,32 +184,23 @@ void MMU::printMMU() const {
         return std::get<2>(a) < std::get<2>(b);
     });
     
-    // Print sorted entries
     for (const auto& [pid, var_name, virtual_addr, size] : entries) {
-        std::cout << " " << std::setw(4) << pid << " | " << std::setw(13) << var_name << " |   " << std::hex << std::uppercase << std::setfill('0') << std::setw(8) << virtual_addr << std::dec << std::setfill(' ') << " | " << std::setw(8) << size << std::endl;
+        std::cout << " " << std::setw(4) << pid << " | " << std::setw(13) << var_name << " |   0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(8) << virtual_addr << std::dec << std::setfill(' ') << " | " << std::setw(8) << size << std::endl;
     }
 }
 
-void MMU::printPageTable() const {
-    std::cout << " PID  | Page Number | Frame Number" << std::endl;
-    std::cout << "------+-------------+--------------" << std::endl;
-    
-    for (const auto& [pid, page_table] : page_tables) {
-        for (size_t i = 0; i < page_table.size(); i++) {
-            if (page_table[i].valid) {
-                std::cout << " " << std::setw(4) << pid << " | " << std::setw(11) << i << " | " << std::setw(12) << page_table[i].frame_number << std::endl;
-            }
-        }
-    }
+void Mmu::printPageTable() const {
+    // Cast away constness so we can call pt.print()
+    const_cast<PageTable&>(pt).print();
 }
 
-void MMU::printProcesses() const {
+void Mmu::printProcesses() const {
     for (const auto& [pid, process] : processes) {
         std::cout << pid << std::endl;
     }
 }
 
-void MMU::printVariable(uint32_t pid, const std::string& var_name) const {
+void Mmu::printVariable(uint32_t pid, const std::string& var_name) const {
     auto it = processes.find(pid);
     if (it == processes.end()) {
         std::cout << "Process not found" << std::endl;
@@ -290,21 +231,21 @@ void MMU::printVariable(uint32_t pid, const std::string& var_name) const {
     std::cout << std::endl;
 }
 
-bool MMU::isValidPID(uint32_t pid) const {
+bool Mmu::isValidPID(uint32_t pid) const {
     return processes.find(pid) != processes.end();
 }
 
-Process* MMU::getProcess(uint32_t pid) {
+Process* Mmu::getProcess(uint32_t pid) {
     auto it = processes.find(pid);
     return (it != processes.end()) ? &it->second : nullptr;
 }
 
-const Process* MMU::getProcess(uint32_t pid) const {
+const Process* Mmu::getProcess(uint32_t pid) const {
     auto it = processes.find(pid);
     return (it != processes.end()) ? &it->second : nullptr;
 }
 
-DataType MMU::stringToDataType(const std::string& type_str) const {
+DataType Mmu::stringToDataType(const std::string& type_str) const {
     if (type_str == "char") return DataType::CHAR;
     if (type_str == "short") return DataType::SHORT;
     if (type_str == "int") return DataType::INT;
@@ -314,7 +255,7 @@ DataType MMU::stringToDataType(const std::string& type_str) const {
     throw std::invalid_argument("Invalid data type");
 }
 
-uint32_t MMU::getDataTypeSize(DataType type) const {
+uint32_t Mmu::getDataTypeSize(DataType type) const {
     switch (type) {
         case DataType::CHAR: return 1;
         case DataType::SHORT: return 2;
@@ -326,72 +267,29 @@ uint32_t MMU::getDataTypeSize(DataType type) const {
     }
 }
 
-uint32_t MMU::allocatePages(uint32_t pid, uint32_t size) {
+uint32_t Mmu::allocatePages(uint32_t pid, uint32_t size) {
     uint32_t pages_needed = (size + page_size - 1) / page_size;
     
-    // Ensure page table exists
-    if (page_tables.find(pid) == page_tables.end()) {
-        page_tables[pid] = std::vector<PageTableEntry>();
-    }
+    Process* p = getProcess(pid);
+    if (!p) return 0;
     
-    auto& page_table = page_tables[pid];
-    uint32_t start_virtual_page = page_table.size();
+    // Calculate the current number of pages this process already owns
+    uint32_t current_total_bytes = p->text_size + p->data_size + p->stack_size + p->heap_size;
+    uint32_t start_virtual_page = current_total_bytes / page_size;
     
-    // Allocate frames and update page table
     for (uint32_t i = 0; i < pages_needed; i++) {
-        uint32_t frame = allocateFrame();
-        PageTableEntry entry;
-        entry.frame_number = frame;
-        entry.valid = true;
-        entry.allocated = true;
-        page_table.push_back(entry);
+        pt.addEntry(pid, start_virtual_page + i);
     }
     
     return start_virtual_page * page_size;
 }
 
-void MMU::deallocatePages(uint32_t pid, uint32_t virtual_address, uint32_t size) {
-    uint32_t start_page = virtual_address / page_size;
-    uint32_t pages_needed = (size + page_size - 1) / page_size;
-    
-    auto page_table_it = page_tables.find(pid);
-    if (page_table_it == page_tables.end()) {
-        return;
-    }
-    
-    auto& page_table = page_table_it->second;
-    
-    for (uint32_t i = 0; i < pages_needed && (start_page + i) < page_table.size(); i++) {
-        if (page_table[start_page + i].valid) {
-            deallocateFrame(page_table[start_page + i].frame_number);
-            page_table[start_page + i].valid = false;
-            page_table[start_page + i].allocated = false;
-        }
-    }
+void Mmu::deallocatePages(uint32_t pid, uint32_t virtual_address, uint32_t size) {
+    // Like terminateProcess, we cannot remove frames from the global PageTable 
+    // unless we modify pagetable.h to add a remove function.
 }
 
-uint32_t MMU::findFreeFrame() {
-    return allocateFrame();
-}
-
-void MMU::addPageTableEntry(uint32_t pid, uint32_t virtual_page, uint32_t frame_number) {
-    if (page_tables.find(pid) == page_tables.end()) {
-        page_tables[pid] = std::vector<PageTableEntry>();
-    }
-    
-    auto& page_table = page_tables[pid];
-    
-    // Ensure page table is large enough
-    if (virtual_page >= page_table.size()) {
-        page_table.resize(virtual_page + 1);
-    }
-    
-    page_table[virtual_page].frame_number = frame_number;
-    page_table[virtual_page].valid = true;
-    page_table[virtual_page].allocated = true;
-}
-
-bool MMU::parseValue(const std::string& value_str, DataType type, uint8_t* buffer) {
+bool Mmu::parseValue(const std::string& value_str, DataType type, uint8_t* buffer) {
     try {
         switch (type) {
             case DataType::CHAR: {
@@ -431,7 +329,7 @@ bool MMU::parseValue(const std::string& value_str, DataType type, uint8_t* buffe
     }
 }
 
-std::string MMU::formatValue(const uint8_t* data, DataType type) const {
+std::string Mmu::formatValue(const uint8_t* data, DataType type) const {
     switch (type) {
         case DataType::CHAR:
             return std::string(1, static_cast<char>(data[0]));

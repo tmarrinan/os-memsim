@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <variant>
 #include <sstream>
+#include "pagetable.h"
 
 const uint64_t TOTAL_MEMORY = 67108864; // 64 MB
 const uint32_t STACK_SIZE = 65536;      // 64 KB
@@ -67,29 +68,19 @@ struct Process {
         : pid(id), text_size(txt), data_size(dat), stack_size(STACK_SIZE), heap_size(0) {}
 };
 
-struct PageTableEntry {
-    uint32_t frame_number;
-    bool valid;
-    bool allocated;
-    
-    PageTableEntry() : frame_number(0), valid(false), allocated(false) {}
-};
-
-class MMU {
+class Mmu {
 private:
     uint32_t page_size;
     uint32_t total_pages;
     uint32_t next_pid;
     
-    std::vector<bool> frame_allocation;  // Track which frames are allocated
     std::unordered_map<uint32_t, Process> processes;
-    std::unordered_map<uint32_t, std::vector<PageTableEntry>> page_tables;
     
-    // Memory management
-    std::vector<std::pair<uint32_t, uint32_t>> free_frames; // (frame_number, size)
+    // The single source of truth for our pages and frames!
+    PageTable pt; 
     
 public:
-    MMU(uint32_t pg_size);
+    Mmu(uint32_t pg_size);
     
     // Process management
     uint32_t createProcess(uint32_t text_size, uint32_t data_size);
@@ -101,8 +92,6 @@ public:
     bool setMemory(uint32_t pid, const std::string& var_name, uint32_t offset, const std::vector<std::string>& values);
     
     // Page management
-    uint32_t allocateFrame();
-    void deallocateFrame(uint32_t frame_number);
     uint32_t virtualToPhysical(uint32_t pid, uint32_t virtual_address);
     
     // Print functions
@@ -122,8 +111,6 @@ private:
     // Helper functions
     uint32_t allocatePages(uint32_t pid, uint32_t size);
     void deallocatePages(uint32_t pid, uint32_t virtual_address, uint32_t size);
-    uint32_t findFreeFrame();
-    void addPageTableEntry(uint32_t pid, uint32_t virtual_page, uint32_t frame_number);
     bool parseValue(const std::string& value_str, DataType type, uint8_t* buffer);
     std::string formatValue(const uint8_t* data, DataType type) const;
 };
