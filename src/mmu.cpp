@@ -41,7 +41,9 @@ uint32_t Mmu::createProcess(uint32_t text_size, uint32_t data_size) {
         allocatePages(pid, total_process_memory);
     } catch (const std::runtime_error& e) {
         processes.erase(pid);
-        throw std::runtime_error("Not enough memory to create process");
+        next_pid--;
+        std::cout << "error: out of memory" << std::endl;
+        return 0;
     }
     
     return pid;
@@ -53,10 +55,8 @@ bool Mmu::terminateProcess(uint32_t pid) {
         return false;
     }
     
-    // NOTE: Because pagetable.h does not have a removeEntry function, 
-    // we cannot easily free the physical frames in the global page table here!
-    // If you are graded on memory leaks, you will need to add a remove/free 
-    // function to PageTable.
+    // Remove all page table entries for this process (frees physical frames)
+    pt.removeAllEntries(pid);
     
     processes.erase(it);
     return true;
@@ -65,37 +65,71 @@ bool Mmu::terminateProcess(uint32_t pid) {
 uint32_t Mmu::allocateMemory(uint32_t pid, const std::string& var_name, DataType type, uint32_t num_elements) {
     auto it = processes.find(pid);
     if (it == processes.end()) {
-        throw std::invalid_argument("Process not found");
+        throw std::invalid_argument("process not found");
     }
     
     Process& process = it->second;
     
     if (process.variables.find(var_name) != process.variables.end()) {
-        throw std::invalid_argument("Variable already exists");
+        throw std::invalid_argument("variable already exists");
     }
     
-    uint32_t size = getDataTypeSize(type) * num_elements;
+    uint32_t element_size = getDataTypeSize(type);
+    uint32_t size = element_size * num_elements;
     
-    // TODO: This currently places the variable at the end of the heap. 
-    // You still need to implement the First-Fit algorithm here to look for holes!
-    uint32_t virtual_address = process.heap_start;
+    // --- First-Fit algorithm ---
+    // Build a sorted list of [start, end) intervals currently occupied on heap
+    uint32_t heap_start = process.heap_start;
     
+    // Collect occupied intervals sorted by virtual_address
+    std::vector<std::pair<uint32_t, uint32_t>> occupied; // (start, end)
     for (const auto& [name, var] : process.variables) {
-        uint32_t var_end = var.virtual_address + var.size;
-        if (var_end > virtual_address) {
-            virtual_address = var_end;
+        occupied.push_back({var.virtual_address, var.virtual_address + var.size});
+    }
+    std::sort(occupied.begin(), occupied.end());
+    
+    // Find first fit hole big enough (no alignment padding)
+    uint32_t candidate = heap_start;
+    
+    uint32_t virtual_address = 0;
+    bool found = false;
+    
+    for (const auto& [ostart, oend] : occupied) {
+        // Check gap between candidate and ostart
+        if (candidate + size <= ostart) {
+            virtual_address = candidate;
+            found = true;
+            break;
+        }
+        // Move candidate past this occupied block
+        if (oend > candidate) {
+            candidate = oend;
         }
     }
     
-    virtual_address = (virtual_address + 3) & ~3;
+    if (!found) {
+        // Place after all occupied blocks
+        virtual_address = candidate;
+    }
     
-    // Check if we need to allocate a new page for this variable
-    uint32_t current_total_memory = process.text_size + process.data_size + process.stack_size + process.heap_size;
-    uint32_t new_total_memory = (virtual_address - process.text_addr) + size;
+    // Check if we need more pages
+    uint32_t current_pages = pt.getNumFrames(pid);
+    uint32_t current_virt_bytes = current_pages * page_size;
     
-    if (new_total_memory > current_total_memory) {
-        uint32_t memory_diff = new_total_memory - current_total_memory;
-        allocatePages(pid, memory_diff);
+    // The new variable ends at virtual_address + size; if this exceeds our
+    // current virtual address space, allocate more pages
+    if (virtual_address + size > current_virt_bytes) {
+        uint32_t extra_needed = (virtual_address + size) - current_virt_bytes;
+        uint32_t pages_needed = (extra_needed + page_size - 1) / page_size;
+        
+        try {
+            for (uint32_t i = 0; i < pages_needed; i++) {
+                pt.addEntry(pid, current_pages + i);
+            }
+        } catch (const std::runtime_error&) {
+            std::cout << "error: out of memory" << std::endl;
+            return 0;
+        }
     }
     
     Variable var(var_name, type, num_elements, virtual_address);
@@ -117,20 +151,40 @@ bool Mmu::deallocateMemory(uint32_t pid, const std::string& var_name) {
         return false;
     }
     
+    uint32_t freed_size = var_it->second.size;
     process.variables.erase(var_it);
+    process.heap_size -= freed_size;
+    
+    // Reclaim pages that are now completely empty in the heap region
+    // Calculate the minimum pages needed now
+    uint32_t base_bytes = process.text_size + process.data_size + process.stack_size;
+    uint32_t max_heap_end = 0;
+    for (const auto& [name, var] : process.variables) {
+        uint32_t vend = var.virtual_address + var.size;
+        if (vend > max_heap_end) max_heap_end = vend;
+    }
+    uint32_t total_needed = base_bytes + (max_heap_end > process.heap_start ? max_heap_end - process.heap_start : 0);
+    uint32_t pages_needed = (total_needed + page_size - 1) / page_size;
+    uint32_t current_pages = pt.getNumFrames(pid);
+    
+    // Remove excess pages
+    for (uint32_t p = pages_needed; p < current_pages; p++) {
+        pt.removeEntry(pid, p);
+    }
+    
     return true;
 }
 
 bool Mmu::setMemory(uint32_t pid, const std::string& var_name, uint32_t offset, const std::vector<std::string>& values) {
     auto it = processes.find(pid);
     if (it == processes.end()) {
-        throw std::invalid_argument("Process not found");
+        throw std::invalid_argument("process not found");
     }
     
     Process& process = it->second;
     auto var_it = process.variables.find(var_name);
     if (var_it == process.variables.end()) {
-        throw std::invalid_argument("Variable not found");
+        throw std::invalid_argument("variable not found");
     }
     
     Variable& var = var_it->second;
@@ -164,7 +218,7 @@ uint32_t Mmu::virtualToPhysical(uint32_t pid, uint32_t virtual_address) {
 
 void Mmu::printMMU() const {
     std::cout << " PID  | Variable Name | Virtual Addr | Size     " << std::endl;
-    std::cout << "------+---------------+--------------+----------" << std::endl;
+    std::cout << "------+---------------+--------------+------------" << std::endl;
     
     std::vector<std::tuple<uint32_t, std::string, uint32_t, uint32_t>> entries;
     
@@ -185,12 +239,16 @@ void Mmu::printMMU() const {
     });
     
     for (const auto& [pid, var_name, virtual_addr, size] : entries) {
-        std::cout << " " << std::setw(4) << pid << " | " << std::setw(13) << var_name << " |   0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(8) << virtual_addr << std::dec << std::setfill(' ') << " | " << std::setw(8) << size << std::endl;
+        std::cout << " " << std::setw(4) << pid
+                  << " | " << std::left << std::setw(13) << var_name << std::right
+                  << " |   0x" << std::hex << std::uppercase
+                  << std::setfill('0') << std::setw(8) << virtual_addr
+                  << std::dec << std::setfill(' ')
+                  << " | " << std::setw(10) << size << std::endl;
     }
 }
 
 void Mmu::printPageTable() const {
-    // Cast away constness so we can call pt.print()
     const_cast<PageTable&>(pt).print();
 }
 
@@ -203,14 +261,14 @@ void Mmu::printProcesses() const {
 void Mmu::printVariable(uint32_t pid, const std::string& var_name) const {
     auto it = processes.find(pid);
     if (it == processes.end()) {
-        std::cout << "Process not found" << std::endl;
+        std::cout << "error: process not found" << std::endl;
         return;
     }
     
     const Process& process = it->second;
     auto var_it = process.variables.find(var_name);
     if (var_it == process.variables.end()) {
-        std::cout << "Variable not found" << std::endl;
+        std::cout << "error: variable not found" << std::endl;
         return;
     }
     
@@ -274,19 +332,17 @@ uint32_t Mmu::allocatePages(uint32_t pid, uint32_t size) {
     if (!p) return 0;
     
     // Calculate the current number of pages this process already owns
-    uint32_t current_total_bytes = p->text_size + p->data_size + p->stack_size + p->heap_size;
-    uint32_t start_virtual_page = current_total_bytes / page_size;
+    uint32_t current_pages = pt.getNumFrames(pid);
     
     for (uint32_t i = 0; i < pages_needed; i++) {
-        pt.addEntry(pid, start_virtual_page + i);
+        pt.addEntry(pid, current_pages + i);
     }
     
-    return start_virtual_page * page_size;
+    return current_pages * page_size;
 }
 
 void Mmu::deallocatePages(uint32_t pid, uint32_t virtual_address, uint32_t size) {
-    // Like terminateProcess, we cannot remove frames from the global PageTable 
-    // unless we modify pagetable.h to add a remove function.
+    // Handled via removeEntry / removeAllEntries in pagetable
 }
 
 bool Mmu::parseValue(const std::string& value_str, DataType type, uint8_t* buffer) {
@@ -347,7 +403,7 @@ std::string Mmu::formatValue(const uint8_t* data, DataType type) const {
             float val;
             std::memcpy(&val, data, 4);
             std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2) << val;
+            oss << val;
             return oss.str();
         }
         case DataType::LONG: {
@@ -359,7 +415,7 @@ std::string Mmu::formatValue(const uint8_t* data, DataType type) const {
             double val;
             std::memcpy(&val, data, 8);
             std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2) << val;
+            oss << val;
             return oss.str();
         }
         default:

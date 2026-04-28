@@ -31,7 +31,6 @@ void PageTable::addEntry(uint32_t pid, int page_number)
     // Combination of pid and page number act as the key to look up frame number
     std::string entry = std::to_string(pid) + "|" + std::to_string(page_number);
 
-    int frame = 0; 
     // Calculate the total number of frames in the 64 MB system
     int total_frames = 67108864 / _page_size;
 
@@ -41,7 +40,7 @@ void PageTable::addEntry(uint32_t pid, int page_number)
     // Loop through the map and mark the taken frames as 'true'
     for (const auto& pair : _table) {
         int taken_frame = pair.second;
-        if (taken_frame < total_frames) {
+        if (taken_frame >= 0 && taken_frame < total_frames) {
             used_frames[taken_frame] = true;
         }
     }
@@ -60,8 +59,39 @@ void PageTable::addEntry(uint32_t pid, int page_number)
     if (frame != -1) {
         _table[entry] = frame;
     } else {
-        std::cout << "error: out of physical memory" << std::endl;
+        throw std::runtime_error("out of physical memory");
     }
+}
+
+void PageTable::removeEntry(uint32_t pid, int page_number)
+{
+    std::string entry = std::to_string(pid) + "|" + std::to_string(page_number);
+    _table.erase(entry);
+}
+
+void PageTable::removeAllEntries(uint32_t pid)
+{
+    std::string prefix = std::to_string(pid) + "|";
+    auto it = _table.begin();
+    while (it != _table.end()) {
+        if (it->first.substr(0, prefix.size()) == prefix) {
+            it = _table.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+int PageTable::getNumFrames(uint32_t pid)
+{
+    std::string prefix = std::to_string(pid) + "|";
+    int count = 0;
+    for (const auto& pair : _table) {
+        if (pair.first.substr(0, prefix.size()) == prefix) {
+            count++;
+        }
+    }
+    return count;
 }
 
 int PageTable::getPhysicalAddress(uint32_t pid, uint32_t virtual_address)
@@ -93,7 +123,7 @@ void PageTable::print()
 
     std::vector<std::string> keys = sortedKeys();
 
-    for (i = 0; i < keys.size(); i++)
+    for (i = 0; i < (int)keys.size(); i++)
     {
         std::string key = keys[i];
         
